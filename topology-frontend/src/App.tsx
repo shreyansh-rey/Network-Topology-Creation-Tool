@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Navbar } from './components/Navbar';
 import { Sidebar } from './components/Sidebar';
 import { GraphCanvas } from './components/GraphCanvas';
@@ -8,6 +8,7 @@ import { AddDeviceForm } from './components/AddDeviceForm';
 import { StatsBar } from './components/StatsBar';
 import { NodeDetailPanel } from './components/NodeDetailPanel';
 import { useTopology } from './hooks/useTopology';
+import Login from './components/Login';
 
 type View = 'dashboard' | 'devices' | 'alerts';
 
@@ -15,12 +16,48 @@ export default function App() {
   const { nodes, edges, alerts, loading, addLoading, backendConnected, fetchTopology, addDevice } = useTopology();
   const [activeView, setActiveView] = useState<View>('dashboard');
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
+  const [loggedIn, setLoggedIn] = useState<boolean | null>(null);
+  const [username, setUsername] = useState<string | null>(null);
 
   const selectedNodeData = selectedNode ? nodes.find((n) => n.id === selectedNode) ?? null : null;
 
+  useEffect(() => {
+    fetch("http://localhost:5000/me", {
+      credentials: "include"
+    })
+      .then(res => {
+        if (!res.ok) throw new Error();
+        return res.json();
+      })
+      .then(data => {
+        setLoggedIn(true);
+        setUsername(data.username);
+      })
+      .catch(() => setLoggedIn(false));
+  }, []);  
+
+  useEffect(() => {
+    fetch("http://localhost:5000/", {
+      credentials: "include"
+    })
+      .then(res => {
+        if (res.ok) setLoggedIn(true);
+        else setLoggedIn(false);
+      })
+      .catch(() => setLoggedIn(false));
+  }, []);
+
+  if (loggedIn === null) {
+    return <div className="text-white p-10">Checking session...</div>;
+  }
+
+  if (!loggedIn) {
+    return <Login onLogin={() => setLoggedIn(true)} />;
+  }
+
   return (
     <div className="flex flex-col h-screen bg-gray-950 text-white overflow-hidden">
-      <Navbar onRefresh={fetchTopology} loading={loading} backendConnected={backendConnected} />
+      <Navbar username={username} onLogout={() => setLoggedIn(false)} onRefresh={fetchTopology} loading={loading} backendConnected={backendConnected} />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar activeView={activeView} onViewChange={setActiveView} alertCount={alerts.length} />
 

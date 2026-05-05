@@ -3,8 +3,11 @@ import { NetworkNode, NetworkEdge, Alert } from '../types';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:5000';
 
-function guessDeviceType(ip: string): NetworkNode['type'] {
+function guessDeviceType(ip?: string): NetworkNode['type'] {
+  if (!ip) return 'unknown';
+
   const lastOctet = parseInt(ip.split('.').pop() || '0', 10);
+
   if (lastOctet === 1) return 'router';
   if (lastOctet >= 2 && lastOctet <= 5) return 'switch';
   return 'host';
@@ -36,12 +39,12 @@ const DUMMY_ALERTS: Alert[] = [
   { id: '4', message: 'Scan complete on 192.168.1.0/24', type: 'info', timestamp: new Date(Date.now() - 600000) },
 ];
 
-function buildNodes(ips: string[]): NetworkNode[] {
-  return ips.map((ip) => ({
-    id: ip,
-    ip,
-    type: guessDeviceType(ip),
-    status: 'active',
+function buildNodes(rawNodes: any[]): NetworkNode[] {
+  return rawNodes.map((node) => ({
+    id: node.id || node.ip,
+    ip: node.ip || node.id,
+    type: node.type || guessDeviceType(node.ip),
+    status: node.status || 'active',
   }));
 }
 
@@ -62,11 +65,24 @@ export function useTopology() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/`, { signal: AbortSignal.timeout(4000) });
+      const res = await fetch(`${API_BASE}/`, {
+        credentials: "include",
+        signal: AbortSignal.timeout(4000) 
+      });
       if (!res.ok) throw new Error('Bad response');
       const data = await res.json();
       setNodes(buildNodes(data.nodes || []));
       setEdges(buildEdges(data.edges || []));
+      if (data.alerts) {
+        const newAlerts = data.alerts.map((msg: string) => ({
+          id: Date.now().toString() + Math.random(),
+          message: msg,
+          type: 'warning',
+          timestamp: new Date(),
+        }));
+      
+        setAlerts((prev) => [...newAlerts, ...prev]);
+      }      
       setBackendConnected(true);
     } catch {
       setBackendConnected(false);
@@ -98,6 +114,7 @@ export function useTopology() {
     try {
       if (backendConnected) {
         const res = await fetch(`${API_BASE}/add`, {
+          credentials: "include",
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ip }),
