@@ -45,6 +45,7 @@ const SPRING_LENGTH = 120;
 const SPRING_K = 0.04;
 const DAMPING = 0.82;
 const CENTER_PULL = 0.03;
+const REST_VELOCITY = 0.05;
 
 export function GraphCanvas({ nodes, edges, selectedNode, onSelectNode }: GraphCanvasProps) {
   const svgRef = useRef<SVGSVGElement>(null);
@@ -75,32 +76,16 @@ export function GraphCanvas({ nodes, edges, selectedNode, onSelectNode }: GraphC
     return () => obs.disconnect();
   }, []);
 
-  useEffect(() => {
-    const existing = new Map(simNodesRef.current.map((n) => [n.id, n]));
-    const cx = dimsRef.current.w / 2;
-    const cy = dimsRef.current.h / 2;
-    const newSim: SimNode[] = nodes.map((n) => {
-      if (existing.has(n.id)) {
-        const e = existing.get(n.id)!;
-        return { ...e, ...n };
-      }
-      const angle = Math.random() * Math.PI * 2;
-      const r = 60 + Math.random() * 100;
-      return { ...n, x: cx + Math.cos(angle) * r, y: cy + Math.sin(angle) * r, vx: 0, vy: 0 };
-    });
-    simNodesRef.current = newSim;
-    setSimNodes([...newSim]);
-  }, [nodes]);
-
   const tick = useCallback(() => {
     const sn = simNodesRef.current;
     if (sn.length === 0) {
-      animFrameRef.current = requestAnimationFrame(tick);
+      animFrameRef.current = 0;
       return;
     }
     const { w, h } = dimsRef.current;
     const cx = w / 2;
     const cy = h / 2;
+    let maxV = 0;
 
     for (let i = 0; i < sn.length; i++) {
       if (dragRef.current?.id === sn[i].id) continue;
@@ -138,16 +123,53 @@ export function GraphCanvas({ nodes, edges, selectedNode, onSelectNode }: GraphC
       sn[i].vy = (sn[i].vy + fy) * DAMPING;
       sn[i].x += sn[i].vx;
       sn[i].y += sn[i].vy;
+
+      maxV = Math.max(maxV, Math.abs(sn[i].vx), Math.abs(sn[i].vy));
     }
 
     setSimNodes([...sn]);
-    animFrameRef.current = requestAnimationFrame(tick);
+
+    if (maxV > REST_VELOCITY || dragRef.current) {
+      animFrameRef.current = requestAnimationFrame(tick);
+    } else {
+      animFrameRef.current = 0;
+    }
   }, [edges]);
 
-  useEffect(() => {
-    animFrameRef.current = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(animFrameRef.current);
+  const wake = useCallback(() => {
+    if (!animFrameRef.current) {
+      animFrameRef.current = requestAnimationFrame(tick);
+    }
   }, [tick]);
+
+  // restart loop whenever tick changes (edges changed)
+  useEffect(() => {
+    cancelAnimationFrame(animFrameRef.current);
+    animFrameRef.current = requestAnimationFrame(tick);
+    return () => {
+      cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = 0;
+    };
+  }, [tick]);
+
+  // sync nodes into sim
+  useEffect(() => {
+    const existing = new Map(simNodesRef.current.map((n) => [n.id, n]));
+    const cx = dimsRef.current.w / 2;
+    const cy = dimsRef.current.h / 2;
+    const newSim: SimNode[] = nodes.map((n) => {
+      if (existing.has(n.id)) {
+        const e = existing.get(n.id)!;
+        return { ...e, ...n, x: e.x, y: e.y, vx: e.vx, vy: e.vy };
+      }
+      const angle = Math.random() * Math.PI * 2;
+      const r = 60 + Math.random() * 100;
+      return { ...n, x: cx + Math.cos(angle) * r, y: cy + Math.sin(angle) * r, vx: 0, vy: 0 };
+    });
+    simNodesRef.current = newSim;
+    setSimNodes([...newSim]);
+    wake();
+  }, [nodes, wake]);
 
   const svgToWorld = useCallback((sx: number, sy: number) => {
     return {
@@ -166,7 +188,8 @@ export function GraphCanvas({ nodes, edges, selectedNode, onSelectNode }: GraphC
     if (!node) return;
     dragRef.current = { id: nodeId, ox: wx - node.x, oy: wy - node.y, mx: wx, my: wy };
     onSelectNode(nodeId);
-  }, [svgToWorld, onSelectNode]);
+    wake();
+  }, [svgToWorld, onSelectNode, wake]);
 
   const onSvgMouseDown = useCallback((e: React.MouseEvent) => {
     if (e.target === svgRef.current || (e.target as SVGElement).tagName === 'rect') {
@@ -191,32 +214,42 @@ export function GraphCanvas({ nodes, edges, selectedNode, onSelectNode }: GraphC
         node.vx = 0;
         node.vy = 0;
       }
+      wake();
     } else if (isPanningRef.current) {
       const dx = sx - panStartRef.current.x;
       const dy = sy - panStartRef.current.y;
       setPan({ x: panStartRef.current.px + dx, y: panStartRef.current.py + dy });
     }
-  }, [svgToWorld]);
+  }, [svgToWorld, wake]);
 
   const onMouseUp = useCallback(() => {
     dragRef.current = null;
     isPanningRef.current = false;
-  }, []);
+    wake();
+  }, [wake]);
 
   const onWheel = useCallback((e: React.WheelEvent) => {
-    e.preventDefault();
     const factor = e.deltaY < 0 ? 1.1 : 0.9;
     const rect = svgRef.current!.getBoundingClientRect();
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
-    setZoom((z) => {
-      const newZ = Math.min(Math.max(z * factor, 0.2), 4);
-      setPan((p) => ({
-        x: mx - (mx - p.x) * (newZ / z),
-        y: my - (my - p.y) * (newZ / z),
-      }));
-      return newZ;
+    const z = zoomRef.current;
+    const newZ = Math.min(Math.max(z * factor, 0.2), 4);
+    const p = panRef.current;
+    setZoom(newZ);
+    setPan({
+      x: mx - (mx - p.x) * (newZ / z),
+      y: my - (my - p.y) * (newZ / z),
     });
+  }, []);
+
+  // non-passive wheel listener so preventDefault works
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el) return;
+    const handler = (e: WheelEvent) => e.preventDefault();
+    el.addEventListener('wheel', handler, { passive: false });
+    return () => el.removeEventListener('wheel', handler);
   }, []);
 
   const nodeMap = new Map(simNodes.map((n) => [n.id, n]));
@@ -238,9 +271,6 @@ export function GraphCanvas({ nodes, edges, selectedNode, onSelectNode }: GraphC
           <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
             <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" strokeWidth="0.5" />
           </pattern>
-          <marker id="arrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
-            <path d="M0,0 L0,6 L6,3 z" fill="#334155" />
-          </marker>
         </defs>
 
         <rect width={dims.w} height={dims.h} fill="url(#grid)" />
@@ -250,9 +280,7 @@ export function GraphCanvas({ nodes, edges, selectedNode, onSelectNode }: GraphC
             const src = nodeMap.get(e.source);
             const tgt = nodeMap.get(e.target);
             if (!src || !tgt) return null;
-            const isSrcSelected = selectedNode === e.source;
-            const isTgtSelected = selectedNode === e.target;
-            const isHighlighted = isSrcSelected || isTgtSelected;
+            const isHighlighted = selectedNode === e.source || selectedNode === e.target;
             return (
               <line
                 key={i}
@@ -284,15 +312,8 @@ export function GraphCanvas({ nodes, edges, selectedNode, onSelectNode }: GraphC
                   <circle r={r + 6} fill="none" stroke={color} strokeWidth={1} strokeOpacity={0.3} />
                 )}
                 <circle
-                  r={r}
-                  fill={isSelected ? color : 'transparent'}
-                  stroke={color}
-                  strokeWidth={isSelected ? 0 : 1.5}
-                  fillOpacity={isSelected ? 1 : 0}
-                />
-                <circle
                   r={r - 2}
-                  fill={isSelected ? '#0f172a' : '#0f172a'}
+                  fill="#0f172a"
                   stroke={color}
                   strokeWidth={1.5}
                 />

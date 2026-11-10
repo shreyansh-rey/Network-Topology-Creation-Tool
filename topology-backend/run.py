@@ -1,35 +1,39 @@
-from flask import Flask, jsonify, request
+import os
+import ipaddress
+
+from flask import Flask, jsonify, request, session
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
-from pysnmp.hlapi import *
 from flask_bcrypt import Bcrypt
-from flask import session
 
+import platform
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'supersecretkey'
-app.config['SESSION_COOKIE_SAMESITE'] = 'None'
-app.config['SESSION_COOKIE_SECURE'] = False   # For local dev
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', os.urandom(24).hex())
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = False  # set True behind HTTPS
 
 CORS(
     app,
     supports_credentials=True,
-    origins=["http://localhost:5173"]
+    origins=["http://localhost:5173", "http://127.0.0.1:5173"],
 )
 bcrypt = Bcrypt(app)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///topology.db'
 db = SQLAlchemy(app)
 
-#Database model
+
 class Device(db.Model):
     __tablename__ = 'device'
 
     id = db.Column(db.Integer, primary_key=True)
     ip = db.Column(db.String(50))
     device_type = db.Column(db.String(20))
-
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+
 
 class User(db.Model):
     __tablename__ = 'user'
@@ -41,62 +45,34 @@ class User(db.Model):
     devices = db.relationship('Device', backref='owner', lazy=True)
 
 
-previous_topology = {
-    "nodes": [],
-    "edges": []
-}
-
-def same_subnet(ip1, ip2):
-    return ip1.split('.')[:3] == ip2.split('.')[:3]
+# previous edge set, keyed by user id
+previous_topology = {}
 
 
-#SNMP Helper
-def snmp_get_sysdescr(ip):
+def valid_ip(ip):
     try:
-        iterator = getCmd(
-            SnmpEngine(),
-            CommunityData('public', mpModel=1),  # SNMPv2c for now
-            UdpTransportTarget((ip, 161), timeout=1, retries=0),
-            ContextData(),
-            ObjectType(ObjectIdentity('1.3.6.1.2.1.1.1.0'))  # sysDescr
-        )
+        ipaddress.IPv4Address(ip)
+    except Exception:
+        return False
+    last = int(ip.split('.')[-1])
+    return last not in (0, 255)
 
-        errorIndication, errorStatus, errorIndex, varBinds = next(iterator)
 
-        if errorIndication or errorStatus:
-            return None
+def classify_device(ip):
+    last = int(ip.split('.')[-1])
+    if last == 1:
+        return "router"
+    if 2 <= last <= 5:
+        return "switch"
+    return "host"
 
-        for varBind in varBinds:
-            return str(varBind[1])
 
-    except:
+def current_user():
+    if 'user' not in session:
         return None
+    return User.query.filter_by(username=session['user']).first()
 
 
-def generate_arp_data(nodes):
-    arp_map = {}
-
-    # Group devices by subnet
-    subnets = {}
-    for ip in nodes:
-        subnet = ".".join(ip.split(".")[:3])
-        subnets.setdefault(subnet, []).append(ip)
-
-    # Within each subnet, create neighbor relationships
-    for subnet_nodes in subnets.values():
-        for i, node in enumerate(subnet_nodes):
-            neighbors = []
-
-            if i > 0:
-                neighbors.append(subnet_nodes[i - 1])
-            if i < len(subnet_nodes) - 1:
-                neighbors.append(subnet_nodes[i + 1])
-
-            arp_map[node] = neighbors
-
-    return arp_map
-
-#ARP logic for edges
 def build_topology(nodes):
     edges = []
 
@@ -104,28 +80,25 @@ def build_topology(nodes):
     switches = [n for n in nodes if n["type"] == "switch"]
     hosts = [n for n in nodes if n["type"] == "host"]
 
-    # Routers connect to routers (backbone)
     for i in range(len(routers) - 1):
-        edges.append([routers[i]["ip"], routers[i+1]["ip"]])
+        edges.append([routers[i]["ip"], routers[i + 1]["ip"]])
 
-    # Switches connect to nearest router
     for i, sw in enumerate(switches):
         if routers:
             edges.append([sw["ip"], routers[i % len(routers)]["ip"]])
 
-    # Hosts connect to switches
     for i, host in enumerate(hosts):
         if switches:
             edges.append([host["ip"], switches[i % len(switches)]["ip"]])
 
     return edges
 
+
 @app.route('/register', methods=['POST'])
 def register():
     try:
         data = request.get_json(force=True)
-
-        username = data.get('username')
+        username = (data.get('username') or '').strip()
         password = data.get('password')
 
         if not username or not password:
@@ -135,147 +108,153 @@ def register():
             return jsonify({"error": "User exists"}), 400
 
         hashed = bcrypt.generate_password_hash(password).decode('utf-8')
-
         user = User(username=username, password=hashed)
         db.session.add(user)
         db.session.commit()
 
         session['user'] = user.username
-
         return jsonify({"status": "registered"})
 
     except Exception as e:
+        db.session.rollback()
         print("REGISTER ERROR:", e)
         return jsonify({"error": "Server error"}), 500
+
 
 @app.route('/me')
 def get_user():
     if 'user' not in session:
         return jsonify({"error": "Unauthorized"}), 401
+    return jsonify({"username": session['user']})
 
-    return jsonify({
-        "username": session['user']
-    })
 
 @app.route('/login', methods=['POST'])
 def login():
     try:
         data = request.get_json(force=True)
-
         username = data.get('username')
-        password = data.get('password')
+        password = data.get('password') or ''
 
         user = User.query.filter_by(username=username).first()
-
-        if not user:
-            return jsonify({"error": "User not found"}), 401
-
-        if not bcrypt.check_password_hash(user.password, password):
-            return jsonify({"error": "Wrong password"}), 401
+        if not user or not bcrypt.check_password_hash(user.password, password):
+            return jsonify({"error": "Invalid credentials"}), 401
 
         session['user'] = user.username
-
         return jsonify({"status": "logged_in"})
 
     except Exception as e:
         print("LOGIN ERROR:", e)
         return jsonify({"error": "Server error"}), 500
 
+
 @app.route('/logout', methods=['POST'])
 def logout():
     session.clear()
+    return jsonify({"status": "logged_out"})
 
-    response = jsonify({"status": "logged_out"})
-    response.set_cookie('session', '', expires=0)
-
-    return response
 
 @app.route('/', methods=['GET'])
 def get_topology():
-    if 'user' not in session:
+    user = current_user()
+    if not user:
         return jsonify({"error": "Unauthorized"}), 401
-    
-    global previous_topology
 
-    user = User.query.filter_by(username=session['user']).first()
     devices = Device.query.filter_by(user_id=user.id).all()
-
-    nodes = []
-    for d in devices:
-        nodes.append({
-            "id": d.ip,
-            "ip": d.ip,
-            "type": d.device_type,
-            "status": "active"
-        })
-
+    nodes = [
+        {"id": d.ip, "ip": d.ip, "type": d.device_type, "status": "active"}
+        for d in devices
+    ]
     edges = build_topology(nodes)
 
-    # --- CHANGE DETECTION ---
-    new_edges = set(tuple(e) for e in edges)
-    old_edges = set(tuple(e) for e in previous_topology["edges"])
-
-    added = new_edges - old_edges
-    removed = old_edges - new_edges
-
     alerts = []
+    new_edges = set(tuple(e) for e in edges)
+    if user.id in previous_topology:
+        old_edges = previous_topology[user.id]
+        alerts += [f"New connection: {a} → {b}" for a, b in new_edges - old_edges]
+        alerts += [f"Connection removed: {a} → {b}" for a, b in old_edges - new_edges]
+    previous_topology[user.id] = new_edges
 
-    for e in added:
-        alerts.append(f"New connection: {e[0]} → {e[1]}")
-
-    for e in removed:
-        alerts.append(f"Connection removed: {e[0]} → {e[1]}")
-
-    # Save current state
-    previous_topology = {
-        "nodes": nodes,
-        "edges": edges
-    }
-
-    return jsonify({
-        "nodes": nodes,
-        "edges": edges,
-        "alerts": alerts
-    })
-
-
-
-def classify_device(ip):
-    last = int(ip.split('.')[-1])
-    if last == 1:
-        return "router"
-    elif last <= 5:
-        return "switch"
-    else:
-        return "host"
+    return jsonify({"nodes": nodes, "edges": edges, "alerts": alerts})
 
 
 @app.route('/add', methods=['POST'])
 def add_device():
-    if 'user' not in session:
+    user = current_user()
+    if not user:
         return jsonify({"error": "Unauthorized"}), 401
 
     data = request.get_json(force=True)
-    ip = data.get('ip')
+    ip = (data.get('ip') or '').strip()
 
-    user = User.query.filter_by(username=session['user']).first()
+    if not valid_ip(ip):
+        return jsonify({"error": "Invalid IP address"}), 400
 
-    if not user:
-        return jsonify({"error": "User not found"}), 400
+    if Device.query.filter_by(ip=ip, user_id=user.id).first():
+        return jsonify({"error": "Device already exists"}), 409
 
-    device = Device(
-        ip=ip,
-        device_type=classify_device(ip),
-        user_id=user.id
-    )
-
-    db.session.add(device)
+    db.session.add(Device(ip=ip, device_type=classify_device(ip), user_id=user.id))
     db.session.commit()
-
     return jsonify({"status": "added"})
 
+
+@app.route('/delete', methods=['POST'])
+def delete_device():
+    user = current_user()
+    if not user:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    ip = (request.get_json(force=True).get('ip') or '').strip()
+    device = Device.query.filter_by(ip=ip, user_id=user.id).first()
+    if not device:
+        return jsonify({"error": "Not found"}), 404
+
+    db.session.delete(device)
+    db.session.commit()
+    return jsonify({"status": "deleted"})
+
+def ping(ip):
+    system = platform.system()
+    if system == 'Windows':
+        cmd = ['ping', '-n', '1', '-w', '1000', ip]
+    elif system == 'Darwin':
+        cmd = ['ping', '-c', '1', '-W', '1000', ip]
+    else:
+        cmd = ['ping', '-c', '1', '-W', '1', ip]
+    try:
+        r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+@app.route('/scan', methods=['POST'])
+def scan_network():
+    user = current_user()
+    if not user:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    cidr = (request.get_json(force=True).get('cidr') or '').strip()
+    try:
+        net = ipaddress.ip_network(cidr, strict=False)
+    except Exception:
+        return jsonify({"error": "Invalid CIDR"}), 400
+
+    if net.version != 4 or net.prefixlen < 24:
+        return jsonify({"error": "Use IPv4 /24 or smaller"}), 400
+
+    hosts = [str(h) for h in net.hosts()]
+    with ThreadPoolExecutor(max_workers=64) as pool:
+        alive = [ip for ip, ok in zip(hosts, pool.map(ping, hosts)) if ok]
+
+    existing = {d.ip for d in Device.query.filter_by(user_id=user.id).all()}
+    new_ips = [ip for ip in alive if ip not in existing]
+    for ip in new_ips:
+        db.session.add(Device(ip=ip, device_type=classify_device(ip), user_id=user.id))
+    db.session.commit()
+
+    return jsonify({"found": len(alive), "added": len(new_ips)})
 
 if __name__ == "__main__":
     with app.app_context():
         db.create_all()
-    app.run(debug=True)
+    app.run(debug=os.environ.get('FLASK_DEBUG') == '1')

@@ -14,11 +14,6 @@ export interface NetworkEdge {
   target: string;
 }
 
-export interface TopologyData {
-  nodes: string[];
-  edges: [string, string][];
-}
-
 export interface Alert {
   id: string;
   message: string;

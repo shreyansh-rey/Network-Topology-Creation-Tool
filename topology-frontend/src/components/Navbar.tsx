@@ -1,6 +1,8 @@
 import { Network, User, RefreshCw, Wifi, WifiOff, LogOut } from 'lucide-react';
 import { useState } from 'react';
 
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:5000';
+
 interface NavbarProps {
   username: string | null;
   onLogout: () => void;
@@ -13,13 +15,16 @@ export function Navbar({ username, onLogout, onRefresh, loading, backendConnecte
   const [open, setOpen] = useState(false);
 
   const handleLogout = async () => {
-    await fetch("http://localhost:5000/logout", {
-      method: "POST",
-      credentials: "include"
-    });
-
-    onLogout();
-  };  
+    try {
+      await fetch(`${API_BASE}/logout`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+    } finally {
+      setOpen(false);
+      onLogout();
+    }
+  };
 
   return (
     <header className="h-14 bg-gray-950 border-b border-gray-800 flex items-center px-6 justify-between flex-shrink-0">
@@ -70,8 +75,8 @@ export function Navbar({ username, onLogout, onRefresh, loading, backendConnecte
             <div className="w-7 h-7 rounded-full bg-gray-800 border border-gray-700 flex items-center justify-center">
               <User size={13} className="text-gray-400" />
             </div>
-            <span className="text-gray-400 text-xs hidden sm:inline">
-              {username?.charAt(0).toUpperCase() || "User"}
+            <span className="text-gray-400 text-xs hidden sm:inline max-w-40 truncate">
+              {username || 'User'}
             </span>
           </div>
 

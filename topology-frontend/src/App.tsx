@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Navbar } from './components/Navbar';
 import { Sidebar } from './components/Sidebar';
 import { GraphCanvas } from './components/GraphCanvas';
 import { DeviceList } from './components/DeviceList';
 import { AlertsPanel } from './components/AlertsPanel';
 import { AddDeviceForm } from './components/AddDeviceForm';
+import { ScanForm } from './components/ScanForm';
 import { StatsBar } from './components/StatsBar';
 import { NodeDetailPanel } from './components/NodeDetailPanel';
 import { useTopology } from './hooks/useTopology';
@@ -12,52 +13,61 @@ import Login from './components/Login';
 
 type View = 'dashboard' | 'devices' | 'alerts';
 
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:5000';
+
 export default function App() {
-  const { nodes, edges, alerts, loading, addLoading, backendConnected, fetchTopology, addDevice } = useTopology();
   const [activeView, setActiveView] = useState<View>('dashboard');
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [loggedIn, setLoggedIn] = useState<boolean | null>(null);
   const [username, setUsername] = useState<string | null>(null);
 
+  const { nodes, edges, alerts, loading, addLoading, backendConnected, fetchTopology, addDevice, scanNetwork } = useTopology(loggedIn === true);
+
   const selectedNodeData = selectedNode ? nodes.find((n) => n.id === selectedNode) ?? null : null;
 
-  useEffect(() => {
-    fetch("http://localhost:5000/me", {
-      credentials: "include"
-    })
-      .then(res => {
+  const loadSession = useCallback(() => {
+    return fetch(`${API_BASE}/me`, { credentials: 'include' })
+      .then((res) => {
         if (!res.ok) throw new Error();
         return res.json();
       })
-      .then(data => {
+      .then((data) => {
         setLoggedIn(true);
         setUsername(data.username);
       })
-      .catch(() => setLoggedIn(false));
-  }, []);  
+      .catch(() => {
+        setLoggedIn(false);
+        setUsername(null);
+      });
+  }, []);
 
   useEffect(() => {
-    fetch("http://localhost:5000/", {
-      credentials: "include"
-    })
-      .then(res => {
-        if (res.ok) setLoggedIn(true);
-        else setLoggedIn(false);
-      })
-      .catch(() => setLoggedIn(false));
-  }, []);
+    loadSession();
+  }, [loadSession]);
+
+  const handleLogout = () => {
+    setLoggedIn(false);
+    setUsername(null);
+    setSelectedNode(null);
+  };
 
   if (loggedIn === null) {
     return <div className="text-white p-10">Checking session...</div>;
   }
 
   if (!loggedIn) {
-    return <Login onLogin={() => setLoggedIn(true)} />;
+    return <Login onLogin={loadSession} />;
   }
 
   return (
     <div className="flex flex-col h-screen bg-gray-950 text-white overflow-hidden">
-      <Navbar username={username} onLogout={() => setLoggedIn(false)} onRefresh={fetchTopology} loading={loading} backendConnected={backendConnected} />
+      <Navbar
+        username={username}
+        onLogout={handleLogout}
+        onRefresh={fetchTopology}
+        loading={loading}
+        backendConnected={backendConnected}
+      />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar activeView={activeView} onViewChange={setActiveView} alertCount={alerts.length} />
 
@@ -66,6 +76,7 @@ export default function App() {
             <>
               <StatsBar nodes={nodes} edges={edges} />
               <AddDeviceForm onAdd={addDevice} loading={addLoading} />
+              <ScanForm onScan={scanNetwork} loading={addLoading} />
 
               <div className="flex gap-4 flex-1 min-h-0 flex-col lg:flex-row">
                 <div className="flex-1 min-h-96 lg:min-h-0 relative">

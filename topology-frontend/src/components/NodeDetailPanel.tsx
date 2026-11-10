@@ -18,6 +18,8 @@ function DeviceIcon({ type }: { type: NetworkNode['type'] }) {
 export function NodeDetailPanel({ node, edges, onClose }: NodeDetailPanelProps) {
   if (!node) return null;
 
+  const isActive = node.status === 'active';
+
   const connected = edges
     .filter((e) => e.source === node.id || e.target === node.id)
     .map((e) => (e.source === node.id ? e.target : e.source));
@@ -41,8 +43,10 @@ export function NodeDetailPanel({ node, edges, onClose }: NodeDetailPanelProps) 
         <div className="bg-gray-800/60 rounded p-2">
           <div className="text-gray-500 text-xs mb-0.5">Status</div>
           <div className="flex items-center gap-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-            <span className="text-emerald-400 text-xs capitalize">{node.status}</span>
+            <span className={`w-1.5 h-1.5 rounded-full ${isActive ? 'bg-emerald-400' : 'bg-gray-500'}`} />
+            <span className={`text-xs capitalize ${isActive ? 'text-emerald-400' : 'text-gray-500'}`}>
+              {node.status}
+            </span>
           </div>
         </div>
       </div>
