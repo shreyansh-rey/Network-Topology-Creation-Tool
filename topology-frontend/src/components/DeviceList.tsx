@@ -1,10 +1,12 @@
 import { NetworkNode } from '../types';
-import { Router, Cpu, Monitor, HelpCircle } from 'lucide-react';
+import { Router, Cpu, Monitor, HelpCircle, Trash2 } from 'lucide-react';
 
 interface DeviceListProps {
   nodes: NetworkNode[];
   selectedNode: string | null;
   onSelectNode: (id: string | null) => void;
+  onDelete?: (ip: string) => void;
+  maxHeight?: number;
 }
 
 function DeviceIcon({ type }: { type: NetworkNode['type'] }) {
@@ -25,7 +27,15 @@ function typeLabel(type: NetworkNode['type']) {
   }
 }
 
-export function DeviceList({ nodes, selectedNode, onSelectNode }: DeviceListProps) {
+function statusStyle(status: NetworkNode['status']) {
+  switch (status) {
+    case 'active': return { label: 'Active', dot: 'bg-emerald-400', text: 'text-emerald-400' };
+    case 'down': return { label: 'Down', dot: 'bg-red-500', text: 'text-red-400' };
+    default: return { label: 'Unknown', dot: 'bg-gray-500', text: 'text-gray-500' };
+  }
+}
+
+export function DeviceList({ nodes, selectedNode, onSelectNode, onDelete, maxHeight = 280 }: DeviceListProps) {
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-lg flex flex-col overflow-hidden">
       <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
@@ -34,7 +44,7 @@ export function DeviceList({ nodes, selectedNode, onSelectNode }: DeviceListProp
           {nodes.length}
         </span>
       </div>
-      <div className="overflow-y-auto flex-1" style={{ maxHeight: 280 }}>
+      <div className="overflow-y-auto flex-1" style={{ maxHeight }}>
         {nodes.length === 0 ? (
           <div className="px-4 py-6 text-center text-gray-600 text-sm">No devices discovered</div>
         ) : (
@@ -44,12 +54,14 @@ export function DeviceList({ nodes, selectedNode, onSelectNode }: DeviceListProp
                 <th className="text-left px-4 py-2 font-medium">IP Address</th>
                 <th className="text-left px-4 py-2 font-medium">Type</th>
                 <th className="text-left px-4 py-2 font-medium">Status</th>
+                {onDelete && <th className="w-8" />}
               </tr>
             </thead>
             <tbody>
               {nodes.map((node) => {
                 const isSelected = selectedNode === node.id;
                 const { label, color } = typeLabel(node.type);
+                const st = statusStyle(node.status);
                 return (
                   <tr
                     key={node.id}
@@ -71,13 +83,25 @@ export function DeviceList({ nodes, selectedNode, onSelectNode }: DeviceListProp
                       <span className={`px-1.5 py-0.5 rounded border text-xs ${color}`}>{label}</span>
                     </td>
                     <td className="px-4 py-2.5">
-                      <div className="flex items-center gap-1.5">
-                        <span className={`w-1.5 h-1.5 rounded-full ${node.status === 'active' ? 'bg-emerald-400' : 'bg-gray-500'}`} />
-                        <span className={node.status === 'active' ? 'text-emerald-400' : 'text-gray-500'}>
-                          {node.status === 'active' ? 'Active' : 'Unknown'}
-                        </span>
+                      <div
+                        className="flex items-center gap-1.5"
+                        title={node.lastSeen ? `Last seen ${new Date(node.lastSeen).toLocaleString()}` : 'Never seen'}
+                      >
+                        <span className={`w-1.5 h-1.5 rounded-full ${st.dot}`} />
+                        <span className={st.text}>{st.label}</span>
                       </div>
                     </td>
+                    {onDelete && (
+                      <td className="pr-3">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); onDelete(node.ip); }}
+                          className="p-1 text-gray-600 hover:text-red-400 transition-colors"
+                          title="Delete device"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </td>
+                    )}
                   </tr>
                 );
               })}

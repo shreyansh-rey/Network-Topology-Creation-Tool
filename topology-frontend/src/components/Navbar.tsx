@@ -1,7 +1,6 @@
 import { Network, User, RefreshCw, Wifi, WifiOff, LogOut } from 'lucide-react';
 import { useState } from 'react';
-
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:5000';
+import { apiFetch, setCsrfToken } from '../api';
 
 interface NavbarProps {
   username: string | null;
@@ -9,18 +8,19 @@ interface NavbarProps {
   onRefresh: () => void;
   loading: boolean;
   backendConnected: boolean;
+  pushConnected?: boolean;
 }
 
-export function Navbar({ username, onLogout, onRefresh, loading, backendConnected }: NavbarProps) {
+export function Navbar({ username, onLogout, onRefresh, loading, backendConnected, pushConnected }: NavbarProps) {
   const [open, setOpen] = useState(false);
 
   const handleLogout = async () => {
     try {
-      await fetch(`${API_BASE}/logout`, {
-        method: 'POST',
-        credentials: 'include',
-      });
+      await apiFetch('/logout', { method: 'POST', noAuthRedirect: true });
+    } catch {
+      // network error: still log out locally
     } finally {
+      setCsrfToken(null);
       setOpen(false);
       onLogout();
     }
@@ -43,7 +43,7 @@ export function Navbar({ username, onLogout, onRefresh, loading, backendConnecte
           {backendConnected ? (
             <>
               <Wifi size={13} className="text-emerald-400" />
-              <span className="text-emerald-400">Live</span>
+              <span className="text-emerald-400">{pushConnected ? 'Live' : 'Live (polling)'}</span>
             </>
           ) : (
             <>

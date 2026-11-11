@@ -1,9 +1,8 @@
 import { useState } from 'react';
 import { Eye, EyeOff, ArrowRight, Loader2, AlertCircle, CheckCircle } from 'lucide-react';
+import { apiFetch, errorMessage, setCsrfToken } from '../api';
 
 type Mode = 'login' | 'signup' | 'forgot';
-
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:5000';
 
 export default function LoginPage({ onLogin }: { onLogin: () => void }) {
   const [mode, setMode] = useState<Mode>('login');
@@ -37,18 +36,18 @@ export default function LoginPage({ onLogin }: { onLogin: () => void }) {
     const endpoint = mode === 'signup' ? 'register' : 'login';
 
     try {
-      const res = await fetch(`${API_BASE}/${endpoint}`, {
+      const res = await apiFetch(`/${endpoint}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ username: email, password }),
+        json: { username: email, password },
+        noAuthRedirect: true,
       });
 
       if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setCsrfToken(data.csrf || null);
         onLogin();
       } else {
-        const data = await res.json().catch(() => ({}));
-        setError(data.error || 'Authentication failed');
+        setError(await errorMessage(res, 'Authentication failed'));
       }
     } catch {
       setError('Server error. Try again.');
@@ -125,6 +124,7 @@ export default function LoginPage({ onLogin }: { onLogin: () => void }) {
                   id="password"
                   type={showPassword ? 'text' : 'password'}
                   required
+                  minLength={mode === 'signup' ? 8 : undefined}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••"

@@ -13,10 +13,12 @@ interface GraphCanvasProps {
   edges: NetworkEdge[];
   selectedNode: string | null;
   onSelectNode: (id: string | null) => void;
+  onPositionsChange?: (positions: Record<string, { x: number; y: number }>) => void;
 }
 
-function nodeColor(type: NetworkNode['type'], selected: boolean) {
+function nodeColor(type: NetworkNode['type'], selected: boolean, status?: NetworkNode['status']) {
   if (selected) return '#f0fffe';
+  if (status === 'down') return '#f87171';
   switch (type) {
     case 'router': return '#38bdf8';
     case 'switch': return '#34d399';
@@ -25,8 +27,9 @@ function nodeColor(type: NetworkNode['type'], selected: boolean) {
   }
 }
 
-function nodeGlow(type: NetworkNode['type'], selected: boolean) {
+function nodeGlow(type: NetworkNode['type'], selected: boolean, status?: NetworkNode['status']) {
   if (selected) return 'drop-shadow(0 0 8px #ffffff88)';
+  if (status === 'down') return 'drop-shadow(0 0 6px #f8717180)';
   switch (type) {
     case 'router': return 'drop-shadow(0 0 6px #38bdf880)';
     case 'switch': return 'drop-shadow(0 0 6px #34d39980)';
@@ -47,7 +50,7 @@ const DAMPING = 0.82;
 const CENTER_PULL = 0.03;
 const REST_VELOCITY = 0.05;
 
-export function GraphCanvas({ nodes, edges, selectedNode, onSelectNode }: GraphCanvasProps) {
+export function GraphCanvas({ nodes, edges, selectedNode, onSelectNode, onPositionsChange }: GraphCanvasProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [simNodes, setSimNodes] = useState<SimNode[]>([]);
   const animFrameRef = useRef<number>(0);
@@ -66,6 +69,10 @@ export function GraphCanvas({ nodes, edges, selectedNode, onSelectNode }: GraphC
   useEffect(() => { panRef.current = pan; }, [pan]);
   useEffect(() => { zoomRef.current = zoom; }, [zoom]);
 
+  const onPositionsChangeRef = useRef(onPositionsChange);
+  useEffect(() => { onPositionsChangeRef.current = onPositionsChange; }, [onPositionsChange]);
+  const lastSavedRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+
   useEffect(() => {
     const obs = new ResizeObserver((entries) => {
       const { width, height } = entries[0].contentRect;
@@ -74,6 +81,25 @@ export function GraphCanvas({ nodes, edges, selectedNode, onSelectNode }: GraphC
     });
     if (svgRef.current?.parentElement) obs.observe(svgRef.current.parentElement);
     return () => obs.disconnect();
+  }, []);
+
+  // report positions to parent once sim rests, only if moved since last report
+  const reportPositions = useCallback(() => {
+    const cb = onPositionsChangeRef.current;
+    if (!cb) return;
+    const sn = simNodesRef.current;
+    const changed = sn.some((n) => {
+      const p = lastSavedRef.current.get(n.id);
+      return !p || Math.hypot(p.x - n.x, p.y - n.y) > 2;
+    });
+    if (!changed) return;
+    const out: Record<string, { x: number; y: number }> = {};
+    for (const n of sn) {
+      const pos = { x: Math.round(n.x * 10) / 10, y: Math.round(n.y * 10) / 10 };
+      out[n.id] = pos;
+      lastSavedRef.current.set(n.id, pos);
+    }
+    cb(out);
   }, []);
 
   const tick = useCallback(() => {
@@ -133,8 +159,9 @@ export function GraphCanvas({ nodes, edges, selectedNode, onSelectNode }: GraphC
       animFrameRef.current = requestAnimationFrame(tick);
     } else {
       animFrameRef.current = 0;
+      reportPositions();
     }
-  }, [edges]);
+  }, [edges, reportPositions]);
 
   const wake = useCallback(() => {
     if (!animFrameRef.current) {
@@ -158,9 +185,20 @@ export function GraphCanvas({ nodes, edges, selectedNode, onSelectNode }: GraphC
     const cx = dimsRef.current.w / 2;
     const cy = dimsRef.current.h / 2;
     const newSim: SimNode[] = nodes.map((n) => {
+      const hasServerPos = typeof n.x === 'number' && typeof n.y === 'number';
       if (existing.has(n.id)) {
         const e = existing.get(n.id)!;
+        const saved = lastSavedRef.current.get(n.id);
+        // server pos differs from last known saved pos: adopt it (first load)
+        if (hasServerPos && (!saved || saved.x !== n.x || saved.y !== n.y)) {
+          lastSavedRef.current.set(n.id, { x: n.x!, y: n.y! });
+          return { ...e, ...n, x: n.x!, y: n.y!, vx: 0, vy: 0 };
+        }
         return { ...e, ...n, x: e.x, y: e.y, vx: e.vx, vy: e.vy };
+      }
+      if (hasServerPos) {
+        lastSavedRef.current.set(n.id, { x: n.x!, y: n.y! });
+        return { ...n, x: n.x!, y: n.y!, vx: 0, vy: 0 };
       }
       const angle = Math.random() * Math.PI * 2;
       const r = 60 + Math.random() * 100;
@@ -291,7 +329,7 @@ export function GraphCanvas({ nodes, edges, selectedNode, onSelectNode }: GraphC
                 stroke={isHighlighted ? '#38bdf8' : '#1e3a5f'}
                 strokeWidth={isHighlighted ? 1.5 : 1}
                 strokeOpacity={isHighlighted ? 0.8 : 0.5}
-                strokeDasharray={isHighlighted ? '' : '4 3'}
+                strokeDasharray={isHighlighted || ['lldp', 'cdp', 'fdb', 'manual'].includes(e.kind ?? '') ? '' : '4 3'}
               />
             );
           })}
@@ -299,8 +337,8 @@ export function GraphCanvas({ nodes, edges, selectedNode, onSelectNode }: GraphC
           {simNodes.map((node) => {
             const isSelected = selectedNode === node.id;
             const r = nodeRadius(node.type);
-            const color = nodeColor(node.type, isSelected);
-            const glow = nodeGlow(node.type, isSelected);
+            const color = nodeColor(node.type, isSelected, node.status);
+            const glow = nodeGlow(node.type, isSelected, node.status);
             return (
               <g
                 key={node.id}
@@ -335,7 +373,7 @@ export function GraphCanvas({ nodes, edges, selectedNode, onSelectNode }: GraphC
                   dy="0.35em"
                   opacity={0.6}
                 >
-                  {node.type.toUpperCase()}
+                  {node.status === 'down' ? 'DOWN' : node.type.toUpperCase()}
                 </text>
               </g>
             );

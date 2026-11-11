@@ -5,15 +5,14 @@ import { GraphCanvas } from './components/GraphCanvas';
 import { DeviceList } from './components/DeviceList';
 import { AlertsPanel } from './components/AlertsPanel';
 import { AddDeviceForm } from './components/AddDeviceForm';
-import { ScanForm } from './components/ScanForm';
+import { ToolsPanel } from './components/ToolsPanel';
 import { StatsBar } from './components/StatsBar';
 import { NodeDetailPanel } from './components/NodeDetailPanel';
 import { useTopology } from './hooks/useTopology';
 import Login from './components/Login';
+import { apiFetch, onUnauthorized, setCsrfToken } from './api';
 
 type View = 'dashboard' | 'devices' | 'alerts';
-
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:5000';
 
 export default function App() {
   const [activeView, setActiveView] = useState<View>('dashboard');
@@ -21,21 +20,24 @@ export default function App() {
   const [loggedIn, setLoggedIn] = useState<boolean | null>(null);
   const [username, setUsername] = useState<string | null>(null);
 
-  const { nodes, edges, alerts, loading, addLoading, backendConnected, fetchTopology, addDevice, scanNetwork } = useTopology(loggedIn === true);
+  const { nodes, edges, alerts, loading, addLoading, backendConnected, pushConnected, fetchTopology, addDevice, scanNetwork, deleteDevice, savePositions, clearAlerts } =
+    useTopology(loggedIn === true);
 
   const selectedNodeData = selectedNode ? nodes.find((n) => n.id === selectedNode) ?? null : null;
 
   const loadSession = useCallback(() => {
-    return fetch(`${API_BASE}/me`, { credentials: 'include' })
+    return apiFetch('/me', { noAuthRedirect: true })
       .then((res) => {
         if (!res.ok) throw new Error();
         return res.json();
       })
       .then((data) => {
+        setCsrfToken(data.csrf || null);
         setLoggedIn(true);
         setUsername(data.username);
       })
       .catch(() => {
+        setCsrfToken(null);
         setLoggedIn(false);
         setUsername(null);
       });
@@ -45,10 +47,40 @@ export default function App() {
     loadSession();
   }, [loadSession]);
 
+  // any API 401 (expired session) -> back to login
+  useEffect(
+    () =>
+      onUnauthorized(() => {
+        setLoggedIn(false);
+        setUsername(null);
+        setSelectedNode(null);
+      }),
+    []
+  );
+
   const handleLogout = () => {
     setLoggedIn(false);
     setUsername(null);
     setSelectedNode(null);
+  };
+
+  const handleClearAlerts = async () => {
+    if (!window.confirm('Clear all alerts?')) return;
+    try {
+      await clearAlerts();
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : 'Failed to clear alerts');
+    }
+  };
+
+  const handleDelete = async (ip: string) => {
+    if (!window.confirm(`Delete device ${ip}?`)) return;
+    try {
+      await deleteDevice(ip);
+      setSelectedNode((cur) => (cur === ip ? null : cur));
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : 'Failed to delete device');
+    }
   };
 
   if (loggedIn === null) {
@@ -67,6 +99,7 @@ export default function App() {
         onRefresh={fetchTopology}
         loading={loading}
         backendConnected={backendConnected}
+        pushConnected={pushConnected}
       />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar activeView={activeView} onViewChange={setActiveView} alertCount={alerts.length} />
@@ -75,16 +108,30 @@ export default function App() {
           {activeView === 'dashboard' && (
             <>
               <StatsBar nodes={nodes} edges={edges} />
-              <AddDeviceForm onAdd={addDevice} loading={addLoading} />
-              <ScanForm onScan={scanNetwork} loading={addLoading} />
 
-              <div className="flex gap-4 flex-1 min-h-0 flex-col lg:flex-row">
+              <div className="bg-gray-900 border border-gray-800 rounded-lg px-3 py-2 flex items-center gap-3">
+                <span className="text-xs font-semibold text-gray-500 uppercase tracking-widest hidden sm:inline whitespace-nowrap">
+                  Quick add
+                </span>
+                <div className="flex-1 min-w-0">
+                  <AddDeviceForm bare onAdd={addDevice} loading={addLoading} />
+                </div>
+                <button
+                  onClick={() => setActiveView('devices')}
+                  className="text-xs text-cyan-400 hover:text-cyan-300 whitespace-nowrap"
+                >
+                  Scan / SNMP tools
+                </button>
+              </div>
+
+              <div className="flex gap-4 flex-1 min-h-[460px] flex-col lg:flex-row">
                 <div className="flex-1 min-h-96 lg:min-h-0 relative">
                   <GraphCanvas
                     nodes={nodes}
                     edges={edges}
                     selectedNode={selectedNode}
                     onSelectNode={setSelectedNode}
+                    onPositionsChange={savePositions}
                   />
                   {selectedNodeData && (
                     <div className="absolute top-3 left-3 w-64">
@@ -92,28 +139,40 @@ export default function App() {
                         node={selectedNodeData}
                         edges={edges}
                         onClose={() => setSelectedNode(null)}
+                        onDelete={handleDelete}
                       />
                     </div>
                   )}
                 </div>
 
                 <div className="lg:w-80 flex flex-col gap-3">
-                  <DeviceList nodes={nodes} selectedNode={selectedNode} onSelectNode={setSelectedNode} />
-                  <AlertsPanel alerts={alerts} />
+                  <DeviceList nodes={nodes} selectedNode={selectedNode} onSelectNode={setSelectedNode} onDelete={handleDelete} />
+                  <AlertsPanel alerts={alerts} onClear={handleClearAlerts} />
                 </div>
               </div>
             </>
           )}
 
           {activeView === 'devices' && (
-            <div className="flex flex-col gap-4 max-w-4xl">
+            <div className="flex flex-col gap-4 max-w-5xl">
               <div>
                 <h2 className="text-white font-semibold text-lg mb-1">Device Management</h2>
-                <p className="text-gray-500 text-sm">Manage and monitor all discovered network devices.</p>
+                <p className="text-gray-500 text-sm">Add, discover and monitor network devices.</p>
               </div>
-              <AddDeviceForm onAdd={addDevice} loading={addLoading} />
               <StatsBar nodes={nodes} edges={edges} />
-              <DeviceList nodes={nodes} selectedNode={selectedNode} onSelectNode={setSelectedNode} />
+              <ToolsPanel
+                onAdd={addDevice}
+                onScan={scanNetwork}
+                onDiscoverDone={fetchTopology}
+                loading={addLoading}
+              />
+              <DeviceList
+                nodes={nodes}
+                selectedNode={selectedNode}
+                onSelectNode={setSelectedNode}
+                onDelete={handleDelete}
+                maxHeight={520}
+              />
             </div>
           )}
 
@@ -126,9 +185,19 @@ export default function App() {
               <div className="bg-gray-900 border border-gray-800 rounded-lg flex flex-col">
                 <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
                   <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-widest">All Events</h3>
-                  <span className="text-xs font-mono text-amber-500 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded-full">
-                    {alerts.length}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    {alerts.length > 0 && (
+                      <button
+                        onClick={handleClearAlerts}
+                        className="text-xs text-gray-500 hover:text-red-400 transition-colors"
+                      >
+                        Clear all
+                      </button>
+                    )}
+                    <span className="text-xs font-mono text-amber-500 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded-full">
+                      {alerts.length}
+                    </span>
+                  </div>
                 </div>
                 <div className="p-3 flex flex-col gap-2">
                   {alerts.map((alert) => {

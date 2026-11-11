@@ -1,10 +1,11 @@
 import { NetworkNode, NetworkEdge } from '../types';
-import { X, Router, Cpu, Monitor } from 'lucide-react';
+import { X, Router, Cpu, Monitor, Trash2 } from 'lucide-react';
 
 interface NodeDetailPanelProps {
   node: NetworkNode | null;
   edges: NetworkEdge[];
   onClose: () => void;
+  onDelete?: (ip: string) => void;
 }
 
 function DeviceIcon({ type }: { type: NetworkNode['type'] }) {
@@ -15,10 +16,11 @@ function DeviceIcon({ type }: { type: NetworkNode['type'] }) {
   }
 }
 
-export function NodeDetailPanel({ node, edges, onClose }: NodeDetailPanelProps) {
+export function NodeDetailPanel({ node, edges, onClose, onDelete }: NodeDetailPanelProps) {
   if (!node) return null;
 
-  const isActive = node.status === 'active';
+  const dot = node.status === 'active' ? 'bg-emerald-400' : node.status === 'down' ? 'bg-red-500' : 'bg-gray-500';
+  const text = node.status === 'active' ? 'text-emerald-400' : node.status === 'down' ? 'text-red-400' : 'text-gray-500';
 
   const connected = edges
     .filter((e) => e.source === node.id || e.target === node.id)
@@ -43,15 +45,35 @@ export function NodeDetailPanel({ node, edges, onClose }: NodeDetailPanelProps) 
         <div className="bg-gray-800/60 rounded p-2">
           <div className="text-gray-500 text-xs mb-0.5">Status</div>
           <div className="flex items-center gap-1">
-            <span className={`w-1.5 h-1.5 rounded-full ${isActive ? 'bg-emerald-400' : 'bg-gray-500'}`} />
-            <span className={`text-xs capitalize ${isActive ? 'text-emerald-400' : 'text-gray-500'}`}>
-              {node.status}
-            </span>
+            <span className={`w-1.5 h-1.5 rounded-full ${dot}`} />
+            <span className={`text-xs capitalize ${text}`}>{node.status}</span>
           </div>
         </div>
       </div>
+      <div className="bg-gray-800/60 rounded p-2 mb-3">
+        <div className="text-gray-500 text-xs mb-0.5">Last seen</div>
+        <div className="text-gray-200 text-xs">
+          {node.lastSeen ? new Date(node.lastSeen).toLocaleString() : 'Never'}
+        </div>
+      </div>
+      {(node.name || node.descr) && (
+        <div className="bg-gray-800/60 rounded p-2 mb-3">
+          {node.name && (
+            <>
+              <div className="text-gray-500 text-xs mb-0.5">Name</div>
+              <div className="text-gray-200 text-xs mb-1.5 break-all">{node.name}</div>
+            </>
+          )}
+          {node.descr && (
+            <>
+              <div className="text-gray-500 text-xs mb-0.5">Description</div>
+              <div className="text-gray-400 text-xs line-clamp-3 break-words" title={node.descr}>{node.descr}</div>
+            </>
+          )}
+        </div>
+      )}
       {connected.length > 0 && (
-        <div>
+        <div className="mb-3">
           <div className="text-gray-500 text-xs mb-1.5">Connected to</div>
           <div className="flex flex-wrap gap-1">
             {connected.map((ip) => (
@@ -61,6 +83,15 @@ export function NodeDetailPanel({ node, edges, onClose }: NodeDetailPanelProps) 
             ))}
           </div>
         </div>
+      )}
+      {onDelete && (
+        <button
+          onClick={() => onDelete(node.ip)}
+          className="w-full flex items-center justify-center gap-2 text-xs text-red-400 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 rounded px-3 py-1.5 transition-colors"
+        >
+          <Trash2 size={12} />
+          Delete device
+        </button>
       )}
     </div>
   );

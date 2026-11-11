@@ -1,15 +1,17 @@
 import { Alert } from '../types';
-import { Info, AlertTriangle, AlertCircle } from 'lucide-react';
+import { Info, AlertTriangle, AlertCircle, Trash2 } from 'lucide-react';
 
 interface AlertsPanelProps {
   alerts: Alert[];
+  onClear?: () => void;
 }
 
 function formatTime(date: Date) {
-  const diff = Math.floor((Date.now() - date.getTime()) / 1000);
+  const diff = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
   if (diff < 60) return `${diff}s ago`;
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
 }
 
 function AlertIcon({ type }: { type: Alert['type'] }) {
@@ -26,14 +28,25 @@ const alertBg: Record<Alert['type'], string> = {
   error: 'bg-red-500/5 border-red-500/15',
 };
 
-export function AlertsPanel({ alerts }: AlertsPanelProps) {
+export function AlertsPanel({ alerts, onClear }: AlertsPanelProps) {
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-lg flex flex-col overflow-hidden">
       <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
         <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-widest">Alerts</h3>
-        <span className="text-xs font-mono text-amber-500 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded-full">
-          {alerts.length}
-        </span>
+        <div className="flex items-center gap-2">
+          {onClear && alerts.length > 0 && (
+            <button
+              onClick={onClear}
+              className="text-gray-600 hover:text-red-400 transition-colors"
+              title="Clear all alerts"
+            >
+              <Trash2 size={12} />
+            </button>
+          )}
+          <span className="text-xs font-mono text-amber-500 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded-full">
+            {alerts.length}
+          </span>
+        </div>
       </div>
       <div className="overflow-y-auto flex-1 p-2 flex flex-col gap-1.5" style={{ maxHeight: 220 }}>
         {alerts.length === 0 ? (

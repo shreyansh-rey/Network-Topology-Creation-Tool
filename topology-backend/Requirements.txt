@@ -1,0 +1,6 @@
+Flask
+Flask-SQLAlchemy
+Flask-Cors
+Flask-Bcrypt
+Flask-Limiter
+pysnmp-lextudio<6.2

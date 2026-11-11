@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { io, Socket } from 'socket.io-client';
 import { NetworkNode, NetworkEdge, Alert } from '../types';
+import { apiFetch, errorMessage, API_BASE } from '../api';
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:5000';
 const MAX_ALERTS = 100;
 
 function guessDeviceType(ip?: string): NetworkNode['type'] {
@@ -47,13 +48,19 @@ function buildNodes(rawNodes: any[]): NetworkNode[] {
       id: node.id || node.ip,
       ip: node.ip || node.id,
       type: node.type || guessDeviceType(node.ip),
-      status: node.status || 'active',
+      status: node.status || 'unknown',
+      lastSeen: node.last_seen || null,
+      x: typeof node.x === 'number' ? node.x : undefined,
+      y: typeof node.y === 'number' ? node.y : undefined,
+      name: node.name || null,
+      descr: node.descr || null,
+      snmp: !!node.snmp,
     };
   });
 }
 
-function buildEdges(rawEdges: [string, string][]): NetworkEdge[] {
-  return rawEdges.map(([source, target]) => ({ source, target }));
+function buildEdges(rawEdges: [string, string, string?][]): NetworkEdge[] {
+  return rawEdges.map(([source, target, kind]) => ({ source, target, kind }));
 }
 
 export function useTopology(enabled: boolean) {
@@ -64,28 +71,27 @@ export function useTopology(enabled: boolean) {
   const [addLoading, setAddLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [backendConnected, setBackendConnected] = useState(false);
+  const [pushConnected, setPushConnected] = useState(false);
 
   const fetchTopology = useCallback(async () => {
     if (!enabled) return;
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/`, {
-        credentials: 'include',
-        signal: AbortSignal.timeout(4000),
-      });
+      const res = await apiFetch('/', { signal: AbortSignal.timeout(4000) });
       if (!res.ok) throw new Error('Bad response');
       const data = await res.json();
       setNodes(buildNodes(data.nodes || []));
       setEdges(buildEdges(data.edges || []));
-      if (data.alerts && data.alerts.length > 0) {
-        const newAlerts: Alert[] = data.alerts.map((msg: string) => ({
-          id: Date.now().toString() + Math.random(),
-          message: msg,
-          type: 'warning',
-          timestamp: new Date(),
-        }));
-        setAlerts((prev) => [...newAlerts, ...prev].slice(0, MAX_ALERTS));
+      if (Array.isArray(data.alerts)) {
+        setAlerts(
+          data.alerts.map((a: { id: number | string; message: string; type?: Alert['type']; timestamp?: string }) => ({
+            id: String(a.id),
+            message: a.message,
+            type: a.type || 'info',
+            timestamp: a.timestamp ? new Date(a.timestamp) : new Date(),
+          }))
+        );
       }
       setBackendConnected(true);
     } catch {
@@ -95,12 +101,66 @@ export function useTopology(enabled: boolean) {
     }
   }, [enabled]);
 
+  const fetchRef = useRef(fetchTopology);
+  useEffect(() => { fetchRef.current = fetchTopology; }, [fetchTopology]);
+
+  // initial load
   useEffect(() => {
     if (!enabled) return;
     fetchTopology();
-    const interval = setInterval(fetchTopology, 15000);
-    return () => clearInterval(interval);
   }, [enabled, fetchTopology]);
+
+  // safety-net polling: slow while push channel is up, fast when it is down
+  useEffect(() => {
+    if (!enabled) return;
+    const interval = setInterval(fetchTopology, pushConnected ? 120000 : 15000);
+    return () => clearInterval(interval);
+  }, [enabled, fetchTopology, pushConnected]);
+
+  // push channel
+  useEffect(() => {
+    if (!enabled) return;
+    const socket: Socket = io(API_BASE, {
+      withCredentials: true,
+      transports: ['websocket', 'polling'],
+    });
+    let debounce: number | undefined;
+
+    socket.on('connect', () => {
+      setPushConnected(true);
+      fetchRef.current(); // catch up on anything missed while offline
+    });
+    socket.on('disconnect', () => setPushConnected(false));
+    socket.on('connect_error', () => setPushConnected(false));
+
+    socket.on('topology', () => {
+      window.clearTimeout(debounce);
+      debounce = window.setTimeout(() => fetchRef.current(), 300);
+    });
+
+    socket.on('alert', (a: { id: number | string; message: string; type?: Alert['type']; timestamp?: string }) => {
+      const id = String(a.id);
+      setAlerts((prev) =>
+        prev.some((x) => x.id === id)
+          ? prev
+          : [
+              {
+                id,
+                message: a.message,
+                type: a.type || 'info',
+                timestamp: a.timestamp ? new Date(a.timestamp) : new Date(),
+              },
+              ...prev,
+            ].slice(0, MAX_ALERTS)
+      );
+    });
+
+    return () => {
+      window.clearTimeout(debounce);
+      socket.disconnect();
+      setPushConnected(false);
+    };
+  }, [enabled]);
 
   const addDevice = useCallback(async (ip: string) => {
     const ipRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
@@ -121,17 +181,12 @@ export function useTopology(enabled: boolean) {
     setAddLoading(true);
     try {
       if (backendConnected) {
-        const res = await fetch(`${API_BASE}/add`, {
-          credentials: 'include',
+        const res = await apiFetch('/add', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ip }),
+          json: { ip },
           signal: AbortSignal.timeout(4000),
         });
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          throw new Error(data.error || 'Failed to add device');
-        }
+        if (!res.ok) throw new Error(await errorMessage(res, 'Failed to add device'));
         await fetchTopology();
       } else {
         const newNode: NetworkNode = {
@@ -154,23 +209,57 @@ export function useTopology(enabled: boolean) {
     }
   }, [nodes, backendConnected, fetchTopology]);
 
-  const scanNetwork = useCallback(async (cidr: string) => {
+  const scanNetwork = useCallback(async (cidr: string, onProgress?: (msg: string) => void) => {
     setAddLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/scan`, {
-        credentials: 'include',
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cidr }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || 'Scan failed');
-      await fetchTopology();
-      return data as { found: number; added: number };
+      const res = await apiFetch('/scan', { method: 'POST', json: { cidr } });
+      if (!res.ok) throw new Error(await errorMessage(res, 'Scan failed'));
+
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 1000));
+        const sres = await apiFetch('/scan/status');
+        if (!sres.ok) throw new Error(await errorMessage(sres, 'Scan status failed'));
+        const data = await sres.json();
+        if (data.status === 'running') {
+          onProgress?.(data.message || 'Scanning...');
+          continue;
+        }
+        if (data.status !== 'done') throw new Error(data.error || 'Scan failed');
+        await fetchTopology();
+        return { found: data.found as number, added: data.added as number };
+      }
     } finally {
       setAddLoading(false);
     }
-  }, [fetchTopology]);  
+  }, [fetchTopology]);
 
-  return { nodes, edges, alerts, loading, addLoading, error, backendConnected, fetchTopology, addDevice, scanNetwork };
+  const deleteDevice = useCallback(async (ip: string) => {
+    if (backendConnected) {
+      const res = await apiFetch('/delete', {
+        method: 'POST',
+        json: { ip },
+        signal: AbortSignal.timeout(4000),
+      });
+      if (!res.ok) throw new Error(await errorMessage(res, 'Failed to delete device'));
+      await fetchTopology();
+    } else {
+      setNodes((prev) => prev.filter((n) => n.ip !== ip));
+      setEdges((prev) => prev.filter((e) => e.source !== ip && e.target !== ip));
+    }
+  }, [backendConnected, fetchTopology]);
+
+  const savePositions = useCallback((positions: Record<string, { x: number; y: number }>) => {
+    if (!backendConnected) return;
+    apiFetch('/positions', { method: 'POST', json: { positions } }).catch(() => {});
+  }, [backendConnected]);
+
+  const clearAlerts = useCallback(async () => {
+    if (backendConnected) {
+      const res = await apiFetch('/alerts/clear', { method: 'POST' });
+      if (!res.ok) throw new Error(await errorMessage(res, 'Failed to clear alerts'));
+    }
+    setAlerts([]);
+  }, [backendConnected]);
+
+  return { nodes, edges, alerts, loading, addLoading, error, backendConnected, pushConnected, fetchTopology, addDevice, scanNetwork, deleteDevice, savePositions, clearAlerts };
 }
